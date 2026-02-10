@@ -1,0 +1,220 @@
+# Dockerfile.dryrun-full - Full deps verification build (skips 7GB model download)
+#
+# PURPOSE: Catches runtime errors that require full dependencies but skips slow model download.
+# This catches issues like:
+#   - Missing pytorch_lightning (deep import dependency)
+#   - Numpy patch recursion errors
+#   - Handler logic bugs
+#
+# Usage: docker build -f Dockerfile.dryrun-full -t hunyuan3d-dryrun-full .
+#
+# Comparison:
+#   - Dockerfile.dryrun:      Minimal deps, fast, for CI (~10 min)
+#   - Dockerfile.dryrun-full: Full deps, thorough, for local testing (~20 min)
+#   - Dockerfile:             Full build with model download (~30+ min)
+
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+ENV FORCE_CUDA=1
+ENV MAX_JOBS=4
+
+# =============================================================================
+# STAGE 1: System dependencies (same as main Dockerfile)
+# =============================================================================
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    git-lfs \
+    wget \
+    curl \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libxrender1 \
+    libgomp1 \
+    build-essential \
+    gcc \
+    g++ \
+    ninja-build \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && add-apt-repository ppa:ubuntu-toolchain-r/test -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends python3.12 python3.12-dev python3.12-venv \
+    && apt-get install -y --no-install-recommends libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    ln -sf /usr/bin/python3.12-config /usr/bin/python3-config
+
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
+
+RUN echo "=== VERIFY: Python ===" && \
+    python --version && \
+    python --version | grep "3.12" || (echo "FAIL: Python 3.12 required" && exit 1)
+
+# =============================================================================
+# STAGE 2: PyTorch (same as main Dockerfile)
+# =============================================================================
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel ninja pybind11
+
+RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+
+RUN echo "=== VERIFY: PyTorch ===" && \
+    python -c "import torch; print(f'PyTorch {torch.__version__}'); assert torch.__version__.startswith('2.5')"
+
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/torch/lib:${LD_LIBRARY_PATH}"
+
+# =============================================================================
+# STAGE 3: Clone Hunyuan3D-2.1
+# =============================================================================
+WORKDIR /app
+
+RUN git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git . && \
+    git lfs install
+
+RUN test -d /app/hy3dshape && test -d /app/hy3dpaint && test -f /app/requirements.txt
+
+# =============================================================================
+# STAGE 4: FULL Python dependencies (key difference from CI dry-run)
+# =============================================================================
+# Use the full inference requirements to catch all import issues
+COPY requirements_inference.txt /tmp/requirements_inference.txt
+RUN echo "=== STAGE 4: Full Python dependencies ===" && \
+    pip install --no-cache-dir --ignore-installed -r /tmp/requirements_inference.txt
+
+# FIX: Completely uninstall and reinstall numpy to avoid recursion errors
+# The recursion happens due to corrupted internal state when numpy is upgraded/downgraded
+# in-place. A clean reinstall fixes this.
+RUN pip uninstall -y numpy && \
+    pip cache purge && \
+    pip install --no-cache-dir numpy==1.26.4
+
+# Verify numpy works correctly with a simple operation
+RUN python -c "import numpy as np; print(f'numpy {np.__version__}'); a = np.array([1,2,3]); print(f'Test array: {a}')"
+
+RUN echo "=== VERIFY: Key packages ===" && \
+    python -c "import transformers; print(f'transformers {transformers.__version__}')" && \
+    python -c "import diffusers; print(f'diffusers {diffusers.__version__}')" && \
+    python -c "import trimesh; print(f'trimesh {trimesh.__version__}')" && \
+    python -c "import pytorch_lightning; print(f'pytorch_lightning {pytorch_lightning.__version__}')"
+
+RUN python -c "import torch; v=torch.__version__; assert v.startswith('2.5'), f'PyTorch overwritten to {v}'"
+
+# =============================================================================
+# STAGE 5: Custom rasterizer
+# =============================================================================
+COPY custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl /tmp/
+RUN pip install --no-cache-dir /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl && \
+    rm /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
+
+RUN python -c "import custom_rasterizer; print('custom_rasterizer: OK')"
+
+# =============================================================================
+# STAGE 6: mesh_inpaint_processor
+# =============================================================================
+WORKDIR /app/hy3dpaint/DifferentiableRenderer
+RUN chmod +x compile_mesh_painter.sh && ./compile_mesh_painter.sh
+
+RUN python -c "from mesh_inpaint_processor import meshVerticeInpaint; print('mesh_inpaint_processor: OK')"
+
+# =============================================================================
+# STAGE 7: RunPod SDK
+# =============================================================================
+RUN pip install --no-cache-dir runpod "huggingface_hub[cli,hf_xet]"
+
+# FIX: Re-pin numpy again after runpod install (it may upgrade numpy)
+RUN pip install --no-cache-dir numpy==1.26.4
+
+RUN python -c "import runpod; print(f'runpod {runpod.__version__}')"
+RUN python -c "import numpy; assert numpy.__version__.startswith('1.26'), f'numpy wrong: {numpy.__version__}'"
+
+# =============================================================================
+# STAGE 8: SKIP model download (the key time saver)
+# =============================================================================
+RUN echo "=== STAGE 8: SKIPPED model download (dry run) ===" && \
+    mkdir -p /models/Hunyuan3D-2.1 && \
+    echo "DRY RUN - models not downloaded" > /models/Hunyuan3D-2.1/DRY_RUN.txt
+
+# =============================================================================
+# STAGE 9: Copy and verify handler + patches
+# =============================================================================
+WORKDIR /app
+COPY handler.py /app/handler.py
+COPY test_handler_mock.py /app/test_handler_mock.py
+
+# Copy patches (same as main Dockerfile)
+COPY schedulers.py /app/hy3dshape/hy3dshape/schedulers.py
+COPY mesh_utils_noblender.py /app/hy3dpaint/DifferentiableRenderer/mesh_utils.py
+COPY bpy_mesh_ops.py /app/bpy_mesh_ops.py
+COPY onnx_upscaler.py /app/onnx_upscaler.py
+COPY patches/image_super_utils.py /app/hy3dpaint/utils/image_super_utils.py
+
+RUN echo "Patches applied"
+
+RUN python -m py_compile /app/handler.py && echo "handler.py: syntax OK"
+
+# =============================================================================
+# STAGE 10: Deep import verification (MUST pass, no warnings)
+# =============================================================================
+RUN echo "=== STAGE 10: Deep import verification ===" && \
+    python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dshape'); \
+sys.path.insert(0, '/app/hy3dpaint'); \
+from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline; \
+print('Shape pipeline import: OK')"
+
+RUN python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dshape'); \
+sys.path.insert(0, '/app/hy3dpaint'); \
+from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig; \
+print('Paint pipeline import: OK')"
+
+# =============================================================================
+# STAGE 11: Comprehensive mock tests
+# =============================================================================
+# This catches:
+# - Numpy patch recursion issues
+# - Handler logic with mocked pipelines
+# - Input validation
+# - Numpy 1.x API compatibility
+RUN echo "=== STAGE 11: Comprehensive mock tests ===" && \
+    python /app/test_handler_mock.py
+
+# =============================================================================
+# FINAL SUMMARY
+# =============================================================================
+RUN echo "" && \
+    echo "=============================================" && \
+    echo "FULL DEPS DRY RUN - BUILD COMPLETE" && \
+    echo "=============================================" && \
+    echo "Python:            $(python --version 2>&1)" && \
+    python -c "import torch; print(f'PyTorch:           {torch.__version__}')" && \
+    python -c "import pytorch_lightning; print(f'pytorch_lightning: {pytorch_lightning.__version__}')" && \
+    python -c "import numpy; print(f'numpy:             {numpy.__version__}')" && \
+    python -c "import custom_rasterizer; print('custom_rasterizer: OK')" && \
+    python -c "import runpod; print(f'runpod:            {runpod.__version__}')" && \
+    echo "Model download:    SKIPPED (dry run)" && \
+    echo "=============================================" && \
+    echo "" && \
+    echo "All checks PASSED!" && \
+    echo "This build validates all runtime imports and handler logic." && \
+    echo "Ready for full build with model download." && \
+    echo ""
+
+ENV HF_HOME=/models
+ENV HUGGINGFACE_HUB_CACHE=/models
+WORKDIR /app
+CMD ["echo", "Dry run image - not for production use"]

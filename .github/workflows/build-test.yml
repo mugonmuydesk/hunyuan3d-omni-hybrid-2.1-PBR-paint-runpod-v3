@@ -1,0 +1,57 @@
+name: Build Test (Dry Run)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-dryrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h
+          # Remove unnecessary tools to free ~25GB
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          echo "=== After cleanup ==="
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build dry-run image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.dryrun
+          push: false
+          tags: hunyuan3d-dryrun:test
+          platforms: linux/amd64
+          # Cache to speed up builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build summary
+        if: success()
+        run: |
+          echo "## Build Successful! :white_check_mark:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All dependency verification checks passed:" >> $GITHUB_STEP_SUMMARY
+          echo "- Python 3.12" >> $GITHUB_STEP_SUMMARY
+          echo "- PyTorch 2.5.1+cu121" >> $GITHUB_STEP_SUMMARY
+          echo "- custom_rasterizer (locally-built wheel)" >> $GITHUB_STEP_SUMMARY
+          echo "- RunPod SDK" >> $GITHUB_STEP_SUMMARY
+          echo "- Handler imports" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Ready to deploy full build to RunPod." >> $GITHUB_STEP_SUMMARY

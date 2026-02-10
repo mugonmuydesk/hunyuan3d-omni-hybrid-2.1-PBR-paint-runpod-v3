@@ -1,0 +1,9 @@
+{
+  "input": {
+    "image_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    "generate_texture": false,
+    "output_format": "glb",
+    "num_views": 4,
+    "texture_resolution": 256
+  }
+}

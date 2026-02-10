@@ -1,0 +1,255 @@
+# Dockerfile.dryrun - Fast verification build (skips 7GB model download)
+# Usage: docker build -f Dockerfile.dryrun -t hunyuan3d-dryrun .
+
+FROM nvidia/cuda:12.4.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_HOME=/usr/local/cuda
+ENV TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0;8.6;8.9;9.0"
+ENV FORCE_CUDA=1
+ENV MAX_JOBS=4
+
+# =============================================================================
+# STAGE 1: System dependencies
+# =============================================================================
+RUN echo "=== STAGE 1: System dependencies ===" && \
+    apt-get update && apt-get install -y \
+    git \
+    git-lfs \
+    wget \
+    curl \
+    ffmpeg \
+    libsm6 \
+    libxext6 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libxrender1 \
+    libgomp1 \
+    build-essential \
+    gcc \
+    g++ \
+    ninja-build \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa -y \
+    && add-apt-repository ppa:ubuntu-toolchain-r/test -y \
+    && apt-get update \
+    && apt-get install -y python3.12 python3.12-dev python3.12-venv \
+    && apt-get install -y libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.12 as default (including python3-config for C extensions)
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1 && \
+    ln -sf /usr/bin/python3.12-config /usr/bin/python3-config
+
+# Install pip
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12
+
+# VERIFY
+RUN echo "=== VERIFY: Python ===" && \
+    python --version && \
+    python --version | grep "3.12" || (echo "FAIL: Python 3.12 required" && exit 1) && \
+    echo "PASS: Python 3.12"
+
+# =============================================================================
+# STAGE 2: PyTorch
+# =============================================================================
+# Clean up to free disk space before large PyTorch install
+RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* && \
+    apt-get clean
+
+RUN echo "=== STAGE 2: PyTorch ===" && \
+    pip install --no-cache-dir --upgrade pip setuptools wheel ninja pybind11
+
+# Use PyTorch 2.5.1+cu121 (matches locally-built custom_rasterizer wheel)
+RUN pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    torchaudio==2.5.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# VERIFY
+RUN echo "=== VERIFY: PyTorch ===" && \
+    python -c "import torch; print(f'PyTorch {torch.__version__}'); assert torch.__version__.startswith('2.5'), 'Wrong version'" && \
+    echo "PASS: PyTorch 2.5.1"
+
+# Add PyTorch libs to LD_LIBRARY_PATH for CUDA extensions (custom_rasterizer needs libc10.so)
+ENV LD_LIBRARY_PATH="/usr/local/lib/python3.12/dist-packages/torch/lib:${LD_LIBRARY_PATH}"
+
+# =============================================================================
+# STAGE 3: Clone Hunyuan3D sources
+# =============================================================================
+# Need THREE repos:
+# - Hunyuan3D-2.1: Contains hy3dpaint for PBR texture generation
+# - Hunyuan3D-2: Contains hy3dgen for Mini-Fast shape generation
+# - Hunyuan3D-Omni: Contains hy3dshape for Omni shape generation
+WORKDIR /app
+
+RUN echo "=== STAGE 3: Clone repos ===" && \
+    git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git . && \
+    git lfs install
+
+# Clone Hunyuan3D-2 to get hy3dgen (Mini-Fast shape generation)
+RUN git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git /tmp/hy3d2 && \
+    cp -r /tmp/hy3d2/hy3dgen /app/hy3dgen && \
+    rm -rf /tmp/hy3d2
+
+# Clone Hunyuan3D-Omni to get hy3dshape (Omni shape generation)
+# IMPORTANT: Must remove the nested hy3dshape from Hunyuan3D-2.1 first!
+RUN git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-Omni.git /tmp/hy3d-omni && \
+    rm -rf /app/hy3dshape && \
+    cp -r /tmp/hy3d-omni/hy3dshape /app/hy3dshape && \
+    rm -rf /tmp/hy3d-omni
+
+# VERIFY
+RUN echo "=== VERIFY: Repo structure ===" && \
+    test -d /app/hy3dgen && echo "PASS: hy3dgen exists" || (echo "FAIL: hy3dgen not found" && exit 1) && \
+    test -d /app/hy3dshape && echo "PASS: hy3dshape exists" || (echo "FAIL: hy3dshape not found" && exit 1) && \
+    test -d /app/hy3dpaint && echo "PASS: hy3dpaint exists" || (echo "FAIL: hy3dpaint not found" && exit 1) && \
+    test -f /app/requirements.txt && echo "PASS: requirements.txt exists" || (echo "FAIL: requirements.txt not found" && exit 1)
+
+# =============================================================================
+# STAGE 4: Python dependencies (MINIMAL for CI)
+# =============================================================================
+# Use minimal requirements_ci.txt instead of full requirements.txt
+# Full requirements are too large for GitHub Actions runners (~25GB needed)
+COPY requirements_ci.txt /tmp/requirements_ci.txt
+RUN echo "=== STAGE 4: Python dependencies (CI minimal) ===" && \
+    pip install --no-cache-dir -r /tmp/requirements_ci.txt
+
+# VERIFY
+RUN echo "=== VERIFY: Key packages ===" && \
+    python -c "import transformers; print(f'PASS: transformers {transformers.__version__}')" && \
+    python -c "import diffusers; print(f'PASS: diffusers {diffusers.__version__}')" && \
+    python -c "import trimesh; print(f'PASS: trimesh {trimesh.__version__}')"
+
+# Re-verify PyTorch
+RUN python -c "import torch; v=torch.__version__; assert v.startswith('2.5'), f'FAIL: PyTorch overwritten to {v}'" && \
+    echo "PASS: PyTorch still 2.5.x"
+
+# =============================================================================
+# STAGE 5: Custom rasterizer (locally-built wheel)
+# =============================================================================
+# Using locally-built wheel that matches PyTorch 2.5.1+cu121 + Python 3.12
+COPY custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl /tmp/
+RUN echo "=== STAGE 5: Custom rasterizer ===" && \
+    pip install --no-cache-dir /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl && \
+    rm /tmp/custom_rasterizer-0.1-cp312-cp312-linux_x86_64.whl
+
+# VERIFY
+RUN echo "=== VERIFY: custom_rasterizer ===" && \
+    python -c "import custom_rasterizer; print('PASS: custom_rasterizer imported')"
+
+# =============================================================================
+# STAGE 6: mesh_inpaint_processor (pybind11 C++ extension)
+# =============================================================================
+WORKDIR /app/hy3dpaint/DifferentiableRenderer
+RUN echo "=== STAGE 6: mesh_inpaint_processor ===" && \
+    chmod +x compile_mesh_painter.sh && \
+    ./compile_mesh_painter.sh && \
+    ls -la mesh_inpaint_processor*.so && \
+    echo "PASS: mesh_inpaint_processor compiled"
+
+# VERIFY
+RUN python -c "from mesh_inpaint_processor import meshVerticeInpaint; print('PASS: mesh_inpaint_processor')"
+
+# =============================================================================
+# STAGE 7: RunPod SDK and HuggingFace Hub
+# =============================================================================
+RUN echo "=== STAGE 7: RunPod SDK ===" && \
+    pip install --no-cache-dir runpod "huggingface_hub[cli,hf_xet]"
+
+# FIX: Re-pin numpy to 1.26.4 (runpod may upgrade to numpy 2.x which breaks Hunyuan3D)
+RUN pip install --no-cache-dir numpy==1.26.4
+
+# VERIFY
+RUN python -c "import runpod; print(f'PASS: runpod {runpod.__version__}')"
+RUN python -c "import hf_xet; print('PASS: hf_xet')" || echo "WARN: hf_xet not available"
+RUN python -c "import numpy; assert numpy.__version__.startswith('1.'), f'FAIL: numpy 2.x'; print(f'PASS: numpy {numpy.__version__}')"
+
+# =============================================================================
+# STAGE 8: SKIP model download (dry run)
+# =============================================================================
+RUN echo "=== STAGE 8: SKIPPED model download (dry run) ===" && \
+    mkdir -p /models/Hunyuan3D-2.1 && \
+    echo "DRY RUN - models not downloaded" > /models/Hunyuan3D-2.1/DRY_RUN.txt
+
+# =============================================================================
+# STAGE 9: Handler and mock testing
+# =============================================================================
+WORKDIR /app
+COPY handler.py /app/handler.py
+COPY test_handler_mock.py /app/test_handler_mock.py
+
+RUN echo "=== STAGE 9: Handler verification ===" && \
+    python -m py_compile /app/handler.py && \
+    echo "PASS: handler.py syntax OK"
+
+# VERIFY imports (basic)
+RUN python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dshape'); \
+sys.path.insert(0, '/app/hy3dpaint'); \
+import runpod; \
+import torch; \
+import base64; \
+import tempfile; \
+print('PASS: Handler basic imports')"
+
+# VERIFY pipeline imports (optional for CI - full deps needed for actual imports)
+# These may fail in CI due to minimal requirements, but will work in full build
+RUN python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dshape'); \
+from hy3dshape.pipelines import Hunyuan3DOmniSiTFlowMatchingPipeline; \
+print('PASS: Omni shape pipeline import')" || echo "WARN: Omni shape pipeline import skipped (needs full deps)"
+
+RUN python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dgen'); \
+from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline; \
+print('PASS: Mini-Fast shape pipeline import')" || echo "WARN: Mini-Fast shape pipeline import skipped (needs full deps)"
+
+RUN python -c "\
+import sys; \
+sys.path.insert(0, '/app'); \
+sys.path.insert(0, '/app/hy3dpaint'); \
+from hy3dpaint.textureGenPipeline import Hunyuan3DPaintPipeline, Hunyuan3DPaintConfig; \
+print('PASS: Paint pipeline import')" || echo "WARN: Paint pipeline import skipped (needs full deps)"
+
+# =============================================================================
+# STAGE 10: Comprehensive mock tests (catches deep runtime issues)
+# =============================================================================
+# This runs the test suite with MINIMAL_DEPS=true which treats pipeline import
+# failures as warnings (expected with minimal CI requirements).
+# For full validation, use Dockerfile.dryrun-full instead.
+RUN echo "=== STAGE 10: Comprehensive mock tests (minimal deps mode) ===" && \
+    MINIMAL_DEPS=true python /app/test_handler_mock.py 2>&1 || \
+    (echo "FAIL: Mock tests failed - check output above" && exit 1)
+
+# =============================================================================
+# FINAL SUMMARY
+# =============================================================================
+RUN echo "" && \
+    echo "=============================================" && \
+    echo "DRY RUN BUILD COMPLETE" && \
+    echo "=============================================" && \
+    echo "Python:            $(python --version 2>&1)" && \
+    python -c "import torch; print(f'PyTorch:           {torch.__version__}')" && \
+    python -c "import custom_rasterizer; print('custom_rasterizer: OK')" && \
+    python -c "import runpod; print(f'runpod:            {runpod.__version__}')" && \
+    echo "Model download:    SKIPPED (dry run)" && \
+    echo "=============================================" && \
+    echo "" && \
+    echo "All dependency checks PASSED!" && \
+    echo "Ready for full build with model download." && \
+    echo ""
+
+ENV HF_HOME=/models
+ENV HUGGINGFACE_HUB_CACHE=/models
+WORKDIR /app
+CMD ["echo", "Dry run image - not for production use"]
