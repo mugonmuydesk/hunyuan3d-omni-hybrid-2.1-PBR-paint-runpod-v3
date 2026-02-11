@@ -82,9 +82,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel ninja pybind11
 # Note: cu124 has known issues with PyTorch 2.5.x, using cu121 instead
 # The CUDA runtime is bundled with PyTorch, so this works with cuda:12.4 base image
 # Install PyTorch packages separately to avoid resolution issues
-RUN pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
-RUN pip install --no-cache-dir torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
-RUN pip install --no-cache-dir torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
 
 # VERIFY: PyTorch installed with CUDA
 RUN python -c "import torch; print(f'PyTorch {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); assert torch.__version__.startswith('2.5'), 'Wrong PyTorch version'"
@@ -146,7 +144,7 @@ RUN python3.11 -m venv /opt/bpy-env && \
     /opt/bpy-env/bin/pip install --no-cache-dir --upgrade pip && \
     /opt/bpy-env/bin/pip install --no-cache-dir \
         --extra-index-url https://download.blender.org/pypi/ \
-        "bpy>=4.2.0" numpy==1.24.3
+        bpy==4.4.0 numpy==1.24.3
 
 # VERIFY: bpy works in the venv
 RUN /opt/bpy-env/bin/python -c "import bpy; print(f'bpy {bpy.app.version_string}')"
@@ -155,10 +153,11 @@ RUN /opt/bpy-env/bin/python -c "import bpy; print(f'bpy {bpy.app.version_string}
 # STAGE 4b: Python dependencies (inference-optimized)
 # =============================================================================
 # Use our trimmed requirements_inference.txt instead of full requirements.txt
-# Excludes: pytorch-lightning, deepspeed, tensorboard, gradio, bpy
-# This reduces image size significantly for serverless inference
+# Excludes: torch (already installed), open3d, cupy, pandas, torchaudio,
+# pythreejs, fastapi, uvicorn, gradio, deepspeed, bpy
+# This reduces image size and build time significantly
 COPY requirements_inference.txt /tmp/requirements_inference.txt
-RUN pip install --no-cache-dir --ignore-installed -r /tmp/requirements_inference.txt
+RUN pip install --no-cache-dir -r /tmp/requirements_inference.txt
 
 # VERIFY: Key packages installed and PyTorch wasn't overwritten
 RUN python -c "import transformers, diffusers, trimesh, torch; assert torch.__version__.startswith('2.5'), f'PyTorch overwritten to {torch.__version__}'; print('Dependencies OK')"
@@ -192,15 +191,9 @@ RUN python -c "from mesh_inpaint_processor import meshVerticeInpaint; print('mes
 # STAGE 7: RunPod SDK and HuggingFace Hub
 # =============================================================================
 # Include hf_xet for faster downloads via Xet Storage protocol
-RUN pip install --no-cache-dir runpod "huggingface_hub[cli,hf_xet]"
-
-# FIX: Completely uninstall and reinstall numpy to avoid recursion errors
-# The recursion happens due to corrupted internal state when numpy is upgraded/downgraded
-# in-place with --ignore-installed. A clean reinstall fixes this.
-# Hunyuan3D uses numpy.core.multiarray.generic which was removed in numpy 2.0
-RUN pip uninstall -y numpy && \
-    pip cache purge && \
-    pip install --no-cache-dir numpy==1.26.4
+# Constrain numpy to prevent runpod/hf_xet from upgrading to numpy 2.x
+# (Hunyuan3D uses numpy.core.multiarray.generic which was removed in numpy 2.0)
+RUN pip install --no-cache-dir "numpy==1.26.4" runpod "huggingface_hub[cli,hf_xet]"
 
 # VERIFY: RunPod SDK, hf_xet, and numpy version
 RUN python -c "import runpod, numpy; assert numpy.__version__.startswith('1.'), f'numpy 2.x detected: {numpy.__version__}'; print(f'runpod {runpod.__version__}, numpy {numpy.__version__}: OK')"
