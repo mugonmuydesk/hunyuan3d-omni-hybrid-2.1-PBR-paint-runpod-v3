@@ -79,9 +79,18 @@ from botocore.config import Config as BotoConfig
 
 
 # =============================================================================
-# Model paths (RunPod Network Volume)
+# Model paths - auto-download from HuggingFace on first cold start
 # =============================================================================
+# HY3DGEN_MODELS: where Omni pipeline caches downloaded models (local_dir mode)
+# HF_HOME: where Mini-Fast/Paint pipelines cache via snapshot_download
+# Both should point to network volume so models persist across cold starts.
 MODEL_BASE = os.environ.get('MODEL_BASE', '/runpod-volume/models')
+os.environ.setdefault('HY3DGEN_MODELS', MODEL_BASE)
+
+# HuggingFace repo IDs for auto-download
+OMNI_REPO = 'tencent/Hunyuan3D-Omni'
+MINI_FAST_REPO = 'tencent/Hunyuan3D-2mini'
+# Paint repo is hardcoded in Hunyuan3DPaintConfig as 'tencent/Hunyuan3D-2.1'
 
 # =============================================================================
 # S3 Configuration (for large output files)
@@ -236,21 +245,26 @@ def load_omni_pipeline():
 
     Omni uses SiT (Scalable Interpolant Transformer) architecture with
     support for multi-modal control signals including skeleton/pose.
+    Auto-downloads from HuggingFace on first run, cached on network volume.
     """
     global shape_pipeline_omni
     from hy3dshape.pipelines import Hunyuan3DOmniSiTFlowMatchingPipeline
+    print(f"Loading Omni pipeline from {OMNI_REPO} (cache: {os.environ.get('HY3DGEN_MODELS')})")
     shape_pipeline_omni = Hunyuan3DOmniSiTFlowMatchingPipeline.from_pretrained(
-        f'{MODEL_BASE}/Hunyuan3D-Omni',
+        OMNI_REPO,
         device=get_device()
     )
 
 
 def load_fast_pipeline():
-    """Load Mini-Fast pipeline for fast mode (0.6B params)"""
+    """Load Mini-Fast pipeline for fast mode (0.6B params)
+    Auto-downloads from HuggingFace on first run, cached on network volume.
+    """
     global shape_pipeline_fast
     from hy3dgen.shapegen import Hunyuan3DDiTFlowMatchingPipeline
+    print(f"Loading Mini-Fast pipeline from {MINI_FAST_REPO} (cache: {os.environ.get('HF_HOME')})")
     shape_pipeline_fast = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        f'{MODEL_BASE}/Hunyuan3D-2mini',
+        MINI_FAST_REPO,
         subfolder='hunyuan3d-dit-v2-mini-fast',
         device=get_device()
     )
@@ -419,15 +433,23 @@ def handler(job: dict) -> dict:
 
     # Health check - returns immediately without loading model
     if job_input == "health_check" or (isinstance(job_input, dict) and job_input.get("health_check")):
+        # Check both direct paths and HF cache for cached models
+        hf_cache = os.path.join(MODEL_BASE, 'hub')
         return {
             "status": "healthy",
             "model_base": MODEL_BASE,
             "models_available": {
-                "omni": os.path.exists(f"{MODEL_BASE}/Hunyuan3D-Omni"),
-                "mini_fast": os.path.exists(f"{MODEL_BASE}/Hunyuan3D-2mini"),
-                "paint_pbr": os.path.exists(f"{MODEL_BASE}/Hunyuan3D-2.1"),
+                "omni": os.path.exists(os.path.join(MODEL_BASE, OMNI_REPO)),
+                "mini_fast": any([
+                    os.path.exists(os.path.join(MODEL_BASE, MINI_FAST_REPO)),
+                    os.path.exists(os.path.join(hf_cache, 'models--tencent--Hunyuan3D-2mini')),
+                ]),
+                "paint_pbr": any([
+                    os.path.exists(os.path.join(hf_cache, 'models--tencent--Hunyuan3D-2.1')),
+                ]),
             },
-            "message": "Handler ready."
+            "download_mode": "auto (HuggingFace)",
+            "message": "Handler ready. Models auto-download on first request."
         }
 
     if not isinstance(job_input, dict):
