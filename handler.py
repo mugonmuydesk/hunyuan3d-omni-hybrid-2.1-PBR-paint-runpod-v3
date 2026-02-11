@@ -53,6 +53,17 @@ import uuid
 from pathlib import Path
 from datetime import datetime
 
+# FIX: Python 3.12 removed pkgutil.ImpImporter, but older setuptools/pkg_resources
+# still reference it. Must patch before any imports that trigger pkg_resources.
+import pkgutil
+if not hasattr(pkgutil, 'ImpImporter'):
+    class _ImpImporterStub:
+        def __init__(self, path=None):
+            self.path = path
+        def find_module(self, fullname, path=None):
+            return None
+    pkgutil.ImpImporter = _ImpImporterStub
+
 # Add Hunyuan3D paths
 sys.path.insert(0, '/app')
 sys.path.insert(0, '/app/hy3dgen')
