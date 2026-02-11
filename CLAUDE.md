@@ -8,9 +8,32 @@ RunPod serverless endpoint for hybrid 3D generation with mode selection:
 - **Pose-conditioned** (`--skeleton`): Omni with skeleton/bone input
 - **Textures**: Hunyuan3D-2.1 PaintPBR (PBR materials)
 
-- **GitHub Repo**: `mugonmuydesk/hunyuan3d-omni-hybrid-2.1-PBR-paint`
-- **Local Path**: `C:\dev\hunyuan3d-omni-hybrid-2.1-PBR-paint`
+- **GitHub Repo**: `mugonmuydesk/hunyuan3d-omni-hybrid-2.1-PBR-paint-runpod-v3`
+- **Endpoint ID**: `ixl24shhyt21s1`
+- **Local Path**: `C:\dev\hunyuan3d-omni-hybrid-2.1-PBR-paint-runpod-v3` (or `/mnt/e/hunyuan3d-omni-hybrid-v3`)
 - **GPU Requirements**: 24GB minimum, 48GB recommended
+
+## Build
+
+```bash
+# Build locally in WSL2 (native Linux fs for speed)
+cp -r /mnt/c/dev/hunyuan3d-omni-hybrid-2.1-PBR-paint-runpod-v3 ~/hunyuan3d-omni-hybrid-v3
+cd ~/hunyuan3d-omni-hybrid-v3
+docker build -t hunyuan3d-omni-hybrid-v3:latest .
+
+# Or from E: drive (slower, Windows fs)
+cd /mnt/e/hunyuan3d-omni-hybrid-v3
+docker build -t hunyuan3d-omni-hybrid-v3:latest .
+```
+
+**Build time:** ~7 min locally, ~15 min on RunPod (30 min limit).
+**Image size:** ~30 GB.
+
+### Build optimizations applied
+- Removed unused deps: open3d (447MB), cupy (104MB), pandas, pythreejs, torchaudio, fastapi, uvicorn
+- Pinned bpy==4.4.0 (avoids downloading 7 candidate wheels)
+- Removed --ignore-installed and Chinese mirror indexes
+- Fixed numpy constraint to prevent runpod upgrading to numpy 2.x
 
 ## API
 
@@ -51,60 +74,29 @@ Sequential loading with explicit VRAM unload between stages.
 ```bash
 # Set credentials
 export RUNPOD_API_KEY="..."
-export RUNPOD_ENDPOINT_ID="..."
 
 # Quality mode (Omni - best quality)
-python hunyuan3d_client.py image.png -o output.glb
+python hunyuan3d_client.py image.png -e omni-hybrid -o output.glb
 
 # Fast mode (Mini-Fast - ~2x faster)
-python hunyuan3d_client.py image.png --fast -o output.glb
+python hunyuan3d_client.py image.png -e omni-hybrid --fast -o output.glb
 
 # Pose-conditioned (skeleton file)
-python hunyuan3d_client.py image.png --skeleton pose.txt -o output.glb
+python hunyuan3d_client.py image.png -e omni-hybrid --skeleton pose.txt -o output.glb
 
 # Shape only (skip textures)
-python hunyuan3d_client.py image.png --no-texture -o output.glb
+python hunyuan3d_client.py image.png -e omni-hybrid --no-texture -o output.glb
 ```
 
-## Local Development
+## Models (Network Volume)
 
-### Build in WSL2 (native Linux fs for speed)
-
-```bash
-# Copy to Linux fs
-cp -r /mnt/c/dev/hunyuan3d-omni-hybrid-2.1-PBR-paint ~/hunyuan3d-omni-hybrid-2.1-PBR-paint
-cd ~/hunyuan3d-omni-hybrid-2.1-PBR-paint
-
-# Build
-docker build -t hunyuan3d-omni-hybrid:test .
+Models stored on RunPod Network Volume, not baked into image:
 ```
-
-### Run Locally
-
-```bash
-docker run --gpus all -p 8000:8000 \
-  -e MAX_NUM_VIEW=6 \
-  -e TEXTURE_RESOLUTION=512 \
-  hunyuan3d-omni-hybrid:test python -u handler.py --rp_serve_api --rp_api_host 0.0.0.0
+/runpod-volume/models/
+  Hunyuan3D-Omni/      (~24GB) - Quality shape generation
+  Hunyuan3D-2mini/     (~7GB)  - Fast shape generation
+  Hunyuan3D-2.1/       (~7GB)  - PBR texture painting
 ```
-
-## Deployment
-
-Push to GitHub - RunPod pulls from GitHub repo:
-
-```bash
-git add -A && git commit -m "Fix: description"
-git push origin master
-# In RunPod console: trigger rebuild from GitHub
-```
-
-## Model Downloads (Selective)
-
-| Model | Repo | allow_patterns | Est. Size |
-|-------|------|----------------|-----------|
-| Omni | `tencent/Hunyuan3D-Omni` | `hunyuan3d-omni-dit/*` | ~8 GB |
-| Mini-Fast | `tencent/Hunyuan3D-2mini` | `hunyuan3d-dit-v2-mini-fast/*` | ~2 GB |
-| PaintPBR | `tencent/Hunyuan3D-2.1` | `hunyuan3d-paintpbr-v2-1/*`, etc. | ~7 GB |
 
 ## Pipeline Classes
 
@@ -116,9 +108,14 @@ git push origin master
 
 ```
 handler.py              # RunPod handler with hybrid routing
-test_handler_mock.py    # Mock tests for routing logic
-Dockerfile              # Production build with selective model downloads
-hunyuan3d_client.py     # CLI client (in C:\dev\runpod\)
+Dockerfile              # Production build
+requirements_inference.txt  # Trimmed deps for inference only
+custom_rasterizer-*.whl # Pre-built CUDA extension wheel
+mesh_utils_noblender.py # bpy subprocess wrapper
+bpy_mesh_ops.py         # Blender mesh ops (runs in /opt/bpy-env)
+onnx_upscaler.py        # ONNX-based RealESRGAN upscaler
+schedulers.py           # Patched schedulers for numpy compat
+patches/                # Patched upstream files
 ```
 
 ## Key Functions
@@ -127,3 +124,10 @@ hunyuan3d_client.py     # CLI client (in C:\dev\runpod\)
 - `parse_skeleton_input(job_input, temp_path)` - Parses skeleton from base64 or JSON
 - `load_omni_pipeline()` / `load_fast_pipeline()` - Lazy pipeline loaders
 - `unload_shape_pipelines()` - VRAM cleanup between stages
+
+## RunPod Build Constraints
+
+| Limit | Value |
+|-------|-------|
+| Max build time | 30 minutes |
+| GPU during build | **Not available** |

@@ -82,8 +82,7 @@ Changes to your repo don't auto-deploy. To update:
 
 | Limit | Value |
 |-------|-------|
-| Max build time | 160 minutes |
-| Max image size | 80 GB |
+| Max build time | 30 minutes |
 | GPU during build | **Not available** (why prebuilt wheel is essential) |
 
 ## Local Testing (Optional)
@@ -165,7 +164,7 @@ with open(f"output.{result['format']}", "wb") as f:
 |----------|---------|-------------|
 | `MAX_NUM_VIEW` | `6` | Default number of texture views |
 | `TEXTURE_RESOLUTION` | `512` | Default texture resolution |
-| `HF_HOME` | `/models` | HuggingFace cache directory |
+| `HF_HOME` | `/runpod-volume/models` | HuggingFace cache directory |
 
 ## Payload Limits
 
