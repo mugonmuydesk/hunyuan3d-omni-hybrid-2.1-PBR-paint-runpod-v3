@@ -195,8 +195,16 @@ RUN python -c "from mesh_inpaint_processor import meshVerticeInpaint; print('mes
 # (Hunyuan3D uses numpy.core.multiarray.generic which was removed in numpy 2.0)
 RUN pip install --no-cache-dir "numpy==1.26.4" runpod "huggingface_hub[cli,hf_xet]"
 
-# VERIFY: RunPod SDK, hf_xet, and numpy version
+# FIX: Upgrade setuptools to fix Python 3.12 compatibility
+# The system pkg_resources at /usr/lib/python3/dist-packages/ uses the removed
+# FileFinder.find_module API. This manifests when pytorch_lightning imports
+# lightning_fabric which calls pkg_resources.declare_namespace().
+# setuptools>=69.0 fixes this. Force-reinstall to override the system copy.
+RUN pip install --no-cache-dir --upgrade --force-reinstall "setuptools>=69.0"
+
+# VERIFY: RunPod SDK, hf_xet, numpy version, and pkg_resources compatibility
 RUN python -c "import runpod, numpy; assert numpy.__version__.startswith('1.'), f'numpy 2.x detected: {numpy.__version__}'; print(f'runpod {runpod.__version__}, numpy {numpy.__version__}: OK')"
+RUN python -c "import pkg_resources; pkg_resources.declare_namespace('test_ns_pkg'); print('pkg_resources: Python 3.12 compat OK')"
 
 # =============================================================================
 # STAGE 8: Model paths (models stored on RunPod Network Volume)
